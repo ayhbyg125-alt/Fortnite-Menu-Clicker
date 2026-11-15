@@ -2,7 +2,6 @@
 #include "plugin_common.h"
 #include "Common.h"
 #include <orbis/Pad.h>
-#include <orbis/VideoOut.h>
 #include <orbis/libkernel.h>
 
 attr_public const char *g_pluginName = "fn_hide_menu";
@@ -10,15 +9,12 @@ attr_public const char *g_pluginDesc = "Blackout screen + configurable button/in
 attr_public const char *g_pluginAuth = "Custom";
 attr_public u32 g_pluginVersion = 0x00000200;
 
-// Function pointers for dynamic linking
 s32 (*scePadReadState)(s32 handle, OrbisPadData *pData);
 s32 (*sceVideoOutSubmitFlip)(s32 handle, s32 bufferIndex, s32 flipMode, s64 flipArg);
-s32 (*sceVideoOutGetBufferInformation)(s32 handle, s32 startIndex, s32 numBuffers, OrbisVideoOutBufferAttribute *attrs);
 
 HOOK_INIT(scePadReadState);
 HOOK_INIT(sceVideoOutSubmitFlip);
 
-// Plugin state (Starts ON automatically at boot to hide startup splash)
 static bool g_BlackoutActive = true;
 static bool g_AutoClickActive = true;
 static bool g_MenuMode = false;
@@ -46,12 +42,12 @@ static const ButtonOption g_Buttons[] = {
     { "Options",        ORBIS_PAD_BUTTON_OPTIONS }
 };
 
-#define NUM_BUTTONS (sizeof(g_Buttons) / sizeof(g_Buttons[0]))
+#define NUM_BUTTONS ((s32)(sizeof(g_Buttons) / sizeof(g_Buttons[0])))
 
-static s32 g_BtnIdx = 0;         // Default: Cross (X)
-static s32 g_UnitMs = 0;         // 0 = Seconds (s), 1 = Milliseconds (ms)
-static s32 g_DelaySecTenths = 20; // 20 = 2.0 seconds
-static s32 g_DelayMs = 500;      // 500 ms
+static s32 g_BtnIdx = 0;
+static s32 g_UnitMs = 0;
+static s32 g_DelaySecTenths = 20;
+static s32 g_DelayMs = 500;
 
 static u32 g_PrevButtons = 0;
 static u64 g_LastClickTime = 0;
@@ -76,9 +72,7 @@ static void ShowStatusToast(const char *header) {
 }
 
 s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, s32 flipMode, s64 flipArg) {
-    // When Blackout is ON, pass invalid/blank flip or suppress game frame display
     if (g_BlackoutActive) {
-        // Flipping bufferIndex -1 or skipping new frame update keeps screen black
         return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32(*)(s32, s32, s32, s64), handle, -1, flipMode, flipArg);
     }
     return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32(*)(s32, s32, s32, s64), handle, bufferIndex, flipMode, flipArg);
@@ -94,7 +88,6 @@ s32 scePadReadState_hook(s32 handle, OrbisPadData *pData) {
     u32 newlyPressed = cur & ~g_PrevButtons;
     g_PrevButtons = cur;
 
-    // 1. Toggle Fullscreen Blackout + Auto-Click with L1 + D-Pad Down
     u32 hideCombo = ORBIS_PAD_BUTTON_L1 | ORBIS_PAD_BUTTON_DOWN;
     if ((cur & hideCombo) == hideCombo && (newlyPressed & hideCombo)) {
         g_BlackoutActive = !g_BlackoutActive;
@@ -103,14 +96,12 @@ s32 scePadReadState_hook(s32 handle, OrbisPadData *pData) {
         ShowStatusToast(g_BlackoutActive ? "Screen Hidden + Macro ON" : "Screen Visible + Macro OFF");
     }
 
-    // 2. Toggle Menu Mode with L1 + R1
     u32 menuCombo = ORBIS_PAD_BUTTON_L1 | ORBIS_PAD_BUTTON_R1;
     if ((cur & menuCombo) == menuCombo && (newlyPressed & menuCombo)) {
         g_MenuMode = !g_MenuMode;
         ShowStatusToast(g_MenuMode ? "MENU OPEN (D-Pad/Square)" : "MENU CLOSED");
     }
 
-    // 3. Menu Navigation (when L1+R1 Menu Mode is open)
     if (g_MenuMode) {
         if (newlyPressed & ORBIS_PAD_BUTTON_RIGHT) {
             g_BtnIdx = (g_BtnIdx + 1) % NUM_BUTTONS;
@@ -123,26 +114,24 @@ s32 scePadReadState_hook(s32 handle, OrbisPadData *pData) {
             ShowStatusToast(g_UnitMs ? "Switched to Milliseconds (ms)" : "Switched to Seconds (s)");
         } else if (newlyPressed & ORBIS_PAD_BUTTON_UP) {
             if (g_UnitMs == 0) {
-                if (g_DelaySecTenths < 100) g_DelaySecTenths += 5; // +0.5s
+                if (g_DelaySecTenths < 100) g_DelaySecTenths += 5;
             } else {
-                if (g_DelayMs < 5000) g_DelayMs += 50; // +50ms
+                if (g_DelayMs < 5000) g_DelayMs += 50;
             }
             ShowStatusToast("Increased Delay");
         } else if (newlyPressed & ORBIS_PAD_BUTTON_DOWN) {
             if (g_UnitMs == 0) {
-                if (g_DelaySecTenths > 5) g_DelaySecTenths -= 5; // -0.5s
+                if (g_DelaySecTenths > 5) g_DelaySecTenths -= 5;
             } else {
-                if (g_DelayMs > 50) g_DelayMs -= 50; // -50ms
+                if (g_DelayMs > 50) g_DelayMs -= 50;
             }
             ShowStatusToast("Decreased Delay");
         }
-        // Swallow menu buttons so they don't click things in Fortnite while editing
         pData->buttons &= ~(ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
                             ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT |
                             ORBIS_PAD_BUTTON_SQUARE);
     }
 
-    // 4. Auto-Clicker Execution
     if (g_AutoClickActive && !g_MenuMode) {
         u64 intervalMicros = (g_UnitMs == 0)
             ? ((u64)g_DelaySecTenths * 100000ULL)
@@ -153,7 +142,7 @@ s32 scePadReadState_hook(s32 handle, OrbisPadData *pData) {
 
         if (elapsed >= intervalMicros) {
             g_LastClickTime = now;
-        } else if (elapsed < 60000ULL) { // Hold button for 60ms
+        } else if (elapsed < 60000ULL) {
             pData->buttons |= g_Buttons[g_BtnIdx].mask;
         }
     }
