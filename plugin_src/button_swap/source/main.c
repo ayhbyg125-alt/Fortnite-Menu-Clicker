@@ -7,6 +7,10 @@
 #include <orbis/VideoOut.h>
 #include <Common.h>
 
+#ifndef attr_public
+#define attr_public __attribute__((visibility("default")))
+#endif
+
 attr_public const char *g_pluginName = "fn_hide";
 attr_public const char *g_pluginDesc = "Fortnite Fullscreen Blackout + Menu Auto-Clicker";
 attr_public const char *g_pluginAuth = "Custom";
@@ -88,8 +92,8 @@ static void show_osd_status(const char *msg) {
 }
 
 static void show_menu_osd(void) {
-    char buf[256];
-    char delayStr[32];
+    char buf;
+    char delayStr;
 
     if (g_useMilliseconds) {
         snprintf(delayStr, sizeof(delayStr), "%u ms", g_delayValue);
@@ -116,8 +120,7 @@ int32_t sceVideoOutRegisterBuffers_hook(int32_t handle, int32_t startIndex, void
         }
     }
     if (attribute && attribute->width > 0 && attribute->height > 0) {
-        uint32_t pitch = (attribute->pitchInPixel > 0) ? attribute->pitchInPixel : attribute->width;
-        g_bufferSize = (size_t)pitch * (size_t)attribute->height * 4;
+        g_bufferSize = (size_t)attribute->width * (size_t)attribute->height * 4;
     }
     return HOOK_CONTINUE(sceVideoOutRegisterBuffers, int32_t (*)(int32_t, int32_t, void * const *, int32_t, const OrbisVideoOutBufferAttribute *), handle, startIndex, addresses, bufferNum, attribute);
 }
