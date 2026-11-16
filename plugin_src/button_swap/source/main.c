@@ -1,183 +1,244 @@
-// Custom Screen Cover + Configurable Auto-Clicker Menu for GoldHEN
-#include "plugin_common.h"
-#include "Common.h"
-#include <orbis/Pad.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <orbis/libkernel.h>
+#include <orbis/Pad.h>
+#include <Common.h>
+#include "plugin_common.h"
 
-attr_public const char *g_pluginName = "fn_hide_menu";
-attr_public const char *g_pluginDesc = "Blackout screen + configurable button/interval auto-clicker";
+// GoldHEN SDK definitions & hooks
+attr_public const char *g_pluginName = "fn_hide";
+attr_public const char *g_pluginDesc = "Fortnite Blackout + Menu Auto-Clicker";
 attr_public const char *g_pluginAuth = "Custom";
-attr_public u32 g_pluginVersion = 0x00000200;
+attr_public uint32_t g_pluginVersion = 0x00000100;
 
-s32 (*scePadReadState)(s32 handle, OrbisPadData *pData);
-s32 (*sceVideoOutSubmitFlip)(s32 handle, s32 bufferIndex, s32 flipMode, s64 flipArg);
+// PS4 Pad Button Masks
+#define BTN_L3       (1 << 1)
+#define BTN_R3       (1 << 2)
+#define BTN_OPTIONS  (1 << 3)
+#define BTN_UP       (1 << 4)
+#define BTN_RIGHT    (1 << 5)
+#define BTN_DOWN     (1 << 6)
+#define BTN_LEFT     (1 << 7)
+#define BTN_L2       (1 << 8)
+#define BTN_R2       (1 << 9)
+#define BTN_L1       (1 << 10)
+#define BTN_R1       (1 << 11)
+#define BTN_TRIANGLE (1 << 12)
+#define BTN_CIRCLE   (1 << 13)
+#define BTN_CROSS    (1 << 14)
+#define BTN_SQUARE   (1 << 15)
+
+// Plugin State
+static bool g_pluginActive = true;       // Starts ON at boot
+static bool g_menuOpen = false;          // Menu Mode (L1 + R1)
+static bool g_waitingForBind = false;    // True after pressing X on Target Button
+static int g_menuIndex = 0;              // 0 = Target Button, 1 = Unit (s/ms), 2 = Delay
+
+// Auto-Clicker Settings
+static uint32_t g_targetButton = BTN_CROSS; // Default Cross (X)
+static bool g_useMilliseconds = false;      // false = seconds, true = ms
+static uint32_t g_delayValue = 2000;        // Default 2000 ms (2.0 s)
+
+// Timing & Edge Detection
+static uint64_t g_lastClickTimeUs = 0;
+static uint64_t g_lastMenuMoveUs = 0;
+static uint32_t g_prevButtons = 0;
 
 HOOK_INIT(scePadReadState);
-HOOK_INIT(sceVideoOutSubmitFlip);
+HOOK_INIT(scePadRead);
 
-static bool g_BlackoutActive = true;
-static bool g_AutoClickActive = true;
-static bool g_MenuMode = false;
+static const char* get_button_name(uint32_t btn) {
+    switch (btn) {
+        case BTN_CROSS:    return "Cross (X)";
+        case BTN_TRIANGLE: return "Triangle";
+        case BTN_CIRCLE:   return "Circle";
+        case BTN_SQUARE:   return "Square";
+        case BTN_L1:       return "L1";
+        case BTN_R1:       return "R1";
+        case BTN_L2:       return "L2";
+        case BTN_R2:       return "R2";
+        case BTN_L3:       return "L3";
+        case BTN_R3:       return "R3";
+        case BTN_UP:       return "D-Pad Up";
+        case BTN_DOWN:     return "D-Pad Down";
+        case BTN_LEFT:     return "D-Pad Left";
+        case BTN_RIGHT:    return "D-Pad Right";
+        case BTN_OPTIONS:  return "Options";
+        default:           return "Custom Button";
+    }
+}
 
-typedef struct {
-    const char *name;
-    u32 mask;
-} ButtonOption;
+static void show_osd_status(const char *msg) {
+    OrbisNotificationRequest req;
+    memset(&req, 0, sizeof(req));
+    req.type = NotificationRequest;
+    req.unk3 = 0;
+    req.useIconImageUri = 0;
+    req.targetId = -1;
+    snprintf(req.message, sizeof(req.message), "%s", msg);
+    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+}
 
-static const ButtonOption g_Buttons[] = {
-    { "Cross (X)",      ORBIS_PAD_BUTTON_CROSS },
-    { "Circle (O)",     ORBIS_PAD_BUTTON_CIRCLE },
-    { "Square ([])",    ORBIS_PAD_BUTTON_SQUARE },
-    { "Triangle (/\\)", ORBIS_PAD_BUTTON_TRIANGLE },
-    { "L1",             ORBIS_PAD_BUTTON_L1 },
-    { "R1",             ORBIS_PAD_BUTTON_R1 },
-    { "L2",             ORBIS_PAD_BUTTON_L2 },
-    { "R2",             ORBIS_PAD_BUTTON_R2 },
-    { "L3",             ORBIS_PAD_BUTTON_L3 },
-    { "R3",             ORBIS_PAD_BUTTON_R3 },
-    { "D-Pad Up",       ORBIS_PAD_BUTTON_UP },
-    { "D-Pad Down",     ORBIS_PAD_BUTTON_DOWN },
-    { "D-Pad Left",     ORBIS_PAD_BUTTON_LEFT },
-    { "D-Pad Right",    ORBIS_PAD_BUTTON_RIGHT },
-    { "Options",        ORBIS_PAD_BUTTON_OPTIONS }
-};
+static void show_menu_osd(void) {
+    char buf[256];
+    char delayStr[32];
 
-#define NUM_BUTTONS ((s32)(sizeof(g_Buttons) / sizeof(g_Buttons[0])))
-
-static s32 g_BtnIdx = 0;
-static s32 g_UnitMs = 0;
-static s32 g_DelaySecTenths = 20;
-static s32 g_DelayMs = 500;
-
-static u32 g_PrevButtons = 0;
-static u64 g_LastClickTime = 0;
-
-static void ShowStatusToast(const char *header) {
-    char msg[256];
-    if (g_UnitMs == 0) {
-        snprintf(msg, sizeof(msg), "%s\nHide: %s | Btn: %s | %d.%ds\n(L1+Down: Hide | L1+R1: Menu)",
-                 header,
-                 g_BlackoutActive ? "ON" : "OFF",
-                 g_Buttons[g_BtnIdx].name,
-                 g_DelaySecTenths / 10,
-                 g_DelaySecTenths % 10);
+    if (g_useMilliseconds) {
+        snprintf(delayStr, sizeof(delayStr), "%u ms", g_delayValue);
     } else {
-        snprintf(msg, sizeof(msg), "%s\nHide: %s | Btn: %s | %dms\n(L1+Down: Hide | L1+R1: Menu)",
-                 header,
-                 g_BlackoutActive ? "ON" : "OFF",
-                 g_Buttons[g_BtnIdx].name,
-                 g_DelayMs);
+        snprintf(delayStr, sizeof(delayStr), "%.1f s", (float)g_delayValue / 1000.0f);
     }
-    Notify(TEX_ICON_SYSTEM, msg);
+
+    if (g_waitingForBind) {
+        snprintf(buf, sizeof(buf), "[MENU] PRESS ANY BUTTON TO BIND...");
+    } else {
+        snprintf(buf, sizeof(buf),
+            "[FN HIDE MENU]\n%s Button: %s\n%s Unit: %s\n%s Delay: %s",
+            (g_menuIndex == 0) ? ">" : " ", get_button_name(g_targetButton),
+            (g_menuIndex == 1) ? ">" : " ", g_useMilliseconds ? "ms" : "s",
+            (g_menuIndex == 2) ? ">" : " ", delayStr);
+    }
+    show_osd_status(buf);
 }
 
-s32 sceVideoOutSubmitFlip_hook(s32 handle, s32 bufferIndex, s32 flipMode, s64 flipArg) {
-    if (g_BlackoutActive) {
-        return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32(*)(s32, s32, s32, s64), handle, -1, flipMode, flipArg);
+// Processes controller state for both scePadReadState and scePadRead (used by Fortnite UE4)
+static void process_pad_data(OrbisPadData *data) {
+    if (!data || !data->connected) return;
+
+    uint32_t raw = data->buttons;
+    uint32_t newlyPressed = raw & ~g_prevButtons;
+    g_prevButtons = raw;
+
+    uint64_t nowUs = sceKernelGetProcessTime();
+
+    // 1. Toggle ON/OFF: L1 + D-Pad Down
+    if ((raw & BTN_L1) && (newlyPressed & BTN_DOWN)) {
+        g_pluginActive = !g_pluginActive;
+        if (!g_pluginActive) {
+            g_menuOpen = false;
+            g_waitingForBind = false;
+        }
+        show_osd_status(g_pluginActive ? "FN Hide + Auto-Click: ON" : "FN Hide + Auto-Click: OFF");
+        data->buttons &= ~(BTN_L1 | BTN_DOWN);
+        return;
     }
-    return HOOK_CONTINUE(sceVideoOutSubmitFlip, s32(*)(s32, s32, s32, s64), handle, bufferIndex, flipMode, flipArg);
+
+    // 2. Toggle Menu Mode: L1 + R1
+    if ((raw & BTN_L1) && (newlyPressed & BTN_R1)) {
+        g_menuOpen = !g_menuOpen;
+        g_waitingForBind = false;
+        if (g_menuOpen) {
+            show_menu_osd();
+        } else {
+            show_osd_status("Menu Closed");
+        }
+        data->buttons &= ~(BTN_L1 | BTN_R1);
+        return;
+    }
+
+    // 3. Menu Mode Navigation & Button Capture
+    if (g_menuOpen) {
+        // If user clicked X on "Target Button", capture the very next button pressed
+        if (g_waitingForBind) {
+            if (newlyPressed != 0) {
+                g_targetButton = newlyPressed;
+                g_waitingForBind = false;
+                show_menu_osd();
+            }
+            // Block input from reaching Fortnite while binding
+            data->buttons = 0;
+            return;
+        }
+
+        // Menu Navigation (Up / Down)
+        if (newlyPressed & BTN_UP) {
+            g_menuIndex = (g_menuIndex + 2) % 3;
+            show_menu_osd();
+        } else if (newlyPressed & BTN_DOWN) {
+            g_menuIndex = (g_menuIndex + 1) % 3;
+            show_menu_osd();
+        }
+
+        // Select / Change Value
+        if (g_menuIndex == 0 && (newlyPressed & BTN_CROSS)) {
+            // Click X to enter capture mode, then press Triangle (or any button)
+            g_waitingForBind = true;
+            show_menu_osd();
+        } else if (g_menuIndex == 1 && ((newlyPressed & BTN_CROSS) || (newlyPressed & BTN_LEFT) || (newlyPressed & BTN_RIGHT))) {
+            // Toggle between Seconds and Milliseconds
+            g_useMilliseconds = !g_useMilliseconds;
+            if (!g_useMilliseconds && g_delayValue < 500) {
+                g_delayValue = 1000; // Default to 1.0s when switching back to seconds
+            }
+            show_menu_osd();
+        } else if (g_menuIndex == 2) {
+            uint32_t step = g_useMilliseconds ? 50 : 500; // 50ms steps or 0.5s steps
+            if ((newlyPressed & BTN_RIGHT) || ((raw & BTN_RIGHT) && (nowUs - g_lastMenuMoveUs > 150000))) {
+                g_delayValue += step;
+                if (g_delayValue > 60000) g_delayValue = 60000;
+                g_lastMenuMoveUs = nowUs;
+                show_menu_osd();
+            } else if ((newlyPressed & BTN_LEFT) || ((raw & BTN_LEFT) && (nowUs - g_lastMenuMoveUs > 150000))) {
+                if (g_delayValue > step) {
+                    g_delayValue -= step;
+                } else {
+                    g_delayValue = g_useMilliseconds ? 50 : 500;
+                }
+                g_lastMenuMoveUs = nowUs;
+                show_menu_osd();
+            }
+        }
+
+        // Block menu inputs from accidentally clicking things inside Fortnite
+        data->buttons = 0;
+        return;
+    }
+
+    // 4. Auto-Clicker Execution (Works inside Fortnite game & menus)
+    if (g_pluginActive) {
+        uint64_t intervalUs = (uint64_t)g_delayValue * 1000ULL;
+        uint64_t elapsedUs = nowUs - g_lastClickTimeUs;
+
+        if (elapsedUs >= intervalUs) {
+            // Hold the simulated button down for 60ms so Fortnite's UI registers the press cleanly
+            data->buttons |= g_targetButton;
+            if (elapsedUs >= intervalUs + 60000ULL) {
+                g_lastClickTimeUs = nowUs;
+            }
+        }
+    }
 }
 
-s32 scePadReadState_hook(s32 handle, OrbisPadData *pData) {
-    s32 ret = HOOK_CONTINUE(scePadReadState, s32(*)(s32, OrbisPadData *), handle, pData);
-    if (ret != 0 || pData == NULL) {
-        return ret;
+int scePadReadState_hook(int32_t handle, OrbisPadData *data) {
+    int ret = HOOK_CONTINUE(scePadReadState, int (*)(int32_t, OrbisPadData *), handle, data);
+    if (ret == 0 && data) {
+        process_pad_data(data);
     }
-
-    u32 cur = pData->buttons;
-    u32 newlyPressed = cur & ~g_PrevButtons;
-    g_PrevButtons = cur;
-
-    u32 hideCombo = ORBIS_PAD_BUTTON_L1 | ORBIS_PAD_BUTTON_DOWN;
-    if ((cur & hideCombo) == hideCombo && (newlyPressed & hideCombo)) {
-        g_BlackoutActive = !g_BlackoutActive;
-        g_AutoClickActive = g_BlackoutActive;
-        g_LastClickTime = sceKernelGetProcessTime();
-        ShowStatusToast(g_BlackoutActive ? "Screen Hidden + Macro ON" : "Screen Visible + Macro OFF");
-    }
-
-    u32 menuCombo = ORBIS_PAD_BUTTON_L1 | ORBIS_PAD_BUTTON_R1;
-    if ((cur & menuCombo) == menuCombo && (newlyPressed & menuCombo)) {
-        g_MenuMode = !g_MenuMode;
-        ShowStatusToast(g_MenuMode ? "MENU OPEN (D-Pad/Square)" : "MENU CLOSED");
-    }
-
-    if (g_MenuMode) {
-        if (newlyPressed & ORBIS_PAD_BUTTON_RIGHT) {
-            g_BtnIdx = (g_BtnIdx + 1) % NUM_BUTTONS;
-            ShowStatusToast("Changed Target Button");
-        } else if (newlyPressed & ORBIS_PAD_BUTTON_LEFT) {
-            g_BtnIdx = (g_BtnIdx - 1 + NUM_BUTTONS) % NUM_BUTTONS;
-            ShowStatusToast("Changed Target Button");
-        } else if (newlyPressed & ORBIS_PAD_BUTTON_SQUARE) {
-            g_UnitMs = !g_UnitMs;
-            ShowStatusToast(g_UnitMs ? "Switched to Milliseconds (ms)" : "Switched to Seconds (s)");
-        } else if (newlyPressed & ORBIS_PAD_BUTTON_UP) {
-            if (g_UnitMs == 0) {
-                if (g_DelaySecTenths < 100) g_DelaySecTenths += 5;
-            } else {
-                if (g_DelayMs < 5000) g_DelayMs += 50;
-            }
-            ShowStatusToast("Increased Delay");
-        } else if (newlyPressed & ORBIS_PAD_BUTTON_DOWN) {
-            if (g_UnitMs == 0) {
-                if (g_DelaySecTenths > 5) g_DelaySecTenths -= 5;
-            } else {
-                if (g_DelayMs > 50) g_DelayMs -= 50;
-            }
-            ShowStatusToast("Decreased Delay");
-        }
-        pData->buttons &= ~(ORBIS_PAD_BUTTON_UP | ORBIS_PAD_BUTTON_DOWN |
-                            ORBIS_PAD_BUTTON_LEFT | ORBIS_PAD_BUTTON_RIGHT |
-                            ORBIS_PAD_BUTTON_SQUARE);
-    }
-
-    if (g_AutoClickActive && !g_MenuMode) {
-        u64 intervalMicros = (g_UnitMs == 0)
-            ? ((u64)g_DelaySecTenths * 100000ULL)
-            : ((u64)g_DelayMs * 1000ULL);
-
-        u64 now = sceKernelGetProcessTime();
-        u64 elapsed = now - g_LastClickTime;
-
-        if (elapsed >= intervalMicros) {
-            g_LastClickTime = now;
-        } else if (elapsed < 60000ULL) {
-            pData->buttons |= g_Buttons[g_BtnIdx].mask;
-        }
-    }
-
     return ret;
 }
 
-s32 attr_public plugin_load(s32 argc, const char* argv[]) {
-    final_printf("[GoldHEN] <%s\\Ver.0x%08x> %s\n", g_pluginName, g_pluginVersion, __func__);
-    boot_ver();
+int scePadRead_hook(int32_t handle, OrbisPadData *data, int32_t num) {
+    int ret = HOOK_CONTINUE(scePadRead, int (*)(int32_t, OrbisPadData *, int32_t), handle, data, num);
+    if (ret > 0 && data) {
+        for (int i = 0; i < ret; i++) {
+            process_pad_data(&data[i]);
+        }
+    }
+    return ret;
+}
 
-    s32 padHandle = 0;
-    sys_dynlib_load_prx("libScePad.sprx", &padHandle);
-    sys_dynlib_dlsym(padHandle, "scePadReadState", &scePadReadState);
-    HOOK32(scePadReadState);
-
-    s32 vidHandle = 0;
-    sys_dynlib_load_prx("libSceVideoOut.sprx", &vidHandle);
-    sys_dynlib_dlsym(vidHandle, "sceVideoOutSubmitFlip", &sceVideoOutSubmitFlip);
-    HOOK32(sceVideoOutSubmitFlip);
-
-    ShowStatusToast("FN Cover Loaded (Active)");
+attr_public int module_start(size_t argc, const void *args) {
+    HOOK(scePadReadState);
+    HOOK(scePadRead);
+    g_lastClickTimeUs = sceKernelGetProcessTime();
+    show_osd_status("fn_hide loaded: ON (L1+Down: Toggle | L1+R1: Menu)");
     return 0;
 }
 
-s32 attr_public plugin_unload(s32 argc, const char* argv[]) {
+attr_public int module_stop(size_t argc, const void *args) {
     UNHOOK(scePadReadState);
-    UNHOOK(sceVideoOutSubmitFlip);
-    return 0;
-}
-
-s32 attr_module_hidden module_start(s64 argc, const void *args) {
-    return 0;
-}
-
-s32 attr_module_hidden module_stop(s64 argc, const void *args) {
+    UNHOOK(scePadRead);
     return 0;
 }
