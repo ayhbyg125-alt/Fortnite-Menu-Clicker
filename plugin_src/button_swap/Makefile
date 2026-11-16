@@ -20,9 +20,9 @@ CFILES   := $(wildcard $(SRC_DIR)/*.c)
 SFILES   := $(wildcard $(SRC_DIR)/*.s)
 OBJS     := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(CFILES)) $(patsubst $(SRC_DIR)/%.s, $(BUILD_DIR)/%.o, $(SFILES))
 
-# Compiler & Linker Flags
-CFLAGS   := -cc1 -triple x86_64-pc-freebsd-elf -munwind-tables -I"$(OO_PS4_TOOLCHAIN)/include" -I"$(SDK)/include" -Iinclude -O2 -Wall -fcolor-diagnostics -std=gnu11 -fPIC -D__ORBIS__
-ASFLAGS  := -target x86_64-pc-freebsd-elf -fPIC
+# Compiler & Linker Flags (using clang driver mode, NOT -cc1)
+CFLAGS   := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -I"$(OO_PS4_TOOLCHAIN)/include" -I"$(SDK)/include" -Iinclude -O2 -Wall -fcolor-diagnostics -std=gnu11 -D__ORBIS__
+ASFLAGS  := --target=x86_64-pc-freebsd12-elf -fPIC
 LDFLAGS  := -m elf_x86_64 -pie --script "$(OO_PS4_TOOLCHAIN)/link.x" -e _init --eh-frame-hdr -L"$(OO_PS4_TOOLCHAIN)/lib" -L"$(SDK)"
 LIBS     := -lSceLibcInternal -lGoldHEN_Hook -lkernel -lSceSysmodule -lSceSystemService -lScePad -lSceVideoOut
 
@@ -37,7 +37,7 @@ $(TARGET): $(OBJS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -emit-obj $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.s
 	@mkdir -p $(BUILD_DIR)
