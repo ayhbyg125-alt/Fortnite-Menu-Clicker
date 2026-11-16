@@ -4,12 +4,12 @@
 #include <string.h>
 #include <orbis/libkernel.h>
 #include <orbis/Pad.h>
+#include <orbis/VideoOut.h>
 #include <Common.h>
 #include "plugin_common.h"
 
-// GoldHEN SDK definitions & hooks
 attr_public const char *g_pluginName = "fn_hide";
-attr_public const char *g_pluginDesc = "Fortnite Blackout + Menu Auto-Clicker";
+attr_public const char *g_pluginDesc = "Fortnite Fullscreen Blackout + Menu Auto-Clicker";
 attr_public const char *g_pluginAuth = "Custom";
 attr_public uint32_t g_pluginVersion = 0x00000100;
 
@@ -31,7 +31,7 @@ attr_public uint32_t g_pluginVersion = 0x00000100;
 #define BTN_SQUARE   (1 << 15)
 
 // Plugin State
-static bool g_pluginActive = true;       // Starts ON at boot
+static bool g_pluginActive = true;       // Starts ON at boot (blackout + auto-click)
 static bool g_menuOpen = false;          // Menu Mode (L1 + R1)
 static bool g_waitingForBind = false;    // True after pressing X on Target Button
 static int g_menuIndex = 0;              // 0 = Target Button, 1 = Unit (s/ms), 2 = Delay
@@ -41,6 +41,11 @@ static uint32_t g_targetButton = BTN_CROSS; // Default Cross (X)
 static bool g_useMilliseconds = false;      // false = seconds, true = ms
 static uint32_t g_delayValue = 2000;        // Default 2000 ms (2.0 s)
 
+// VideoOut Buffer Tracking for Fullscreen Blackout
+#define MAX_VIDEO_BUFFERS 16
+static void *g_bufferAddrs[MAX_VIDEO_BUFFERS] = {0};
+static size_t g_bufferSize = 1920 * 1080 * 4; // Standard 1080p RGBA framebuffer
+
 // Timing & Edge Detection
 static uint64_t g_lastClickTimeUs = 0;
 static uint64_t g_lastMenuMoveUs = 0;
@@ -48,6 +53,8 @@ static uint32_t g_prevButtons = 0;
 
 HOOK_INIT(scePadReadState);
 HOOK_INIT(scePadRead);
+HOOK_INIT(sceVideoOutRegisterBuffers);
+HOOK_INIT(sceVideoOutSubmitFlip);
 
 static const char* get_button_name(uint32_t btn) {
     switch (btn) {
@@ -82,8 +89,8 @@ static void show_osd_status(const char *msg) {
 }
 
 static void show_menu_osd(void) {
-    char buf[256];
-    char delayStr[32];
+    char buf;
+    char delayStr;
 
     if (g_useMilliseconds) {
         snprintf(delayStr, sizeof(delayStr), "%u ms", g_delayValue);
@@ -103,7 +110,31 @@ static void show_menu_osd(void) {
     show_osd_status(buf);
 }
 
-// Processes controller state for both scePadReadState and scePadRead (used by Fortnite UE4)
+// Track registered framebuffers and resolution
+int32_t sceVideoOutRegisterBuffers_hook(int32_t handle, int32_t startIndex, void * const *addresses, int32_t bufferNum, const OrbisVideoOutBufferAttribute *attribute) {
+    if (addresses && bufferNum > 0) {
+        for (int i = 0; i < bufferNum && (startIndex + i) < MAX_VIDEO_BUFFERS; i++) {
+            g_bufferAddrs[startIndex + i] = addresses[i];
+        }
+    }
+    if (attribute && attribute->width > 0 && attribute->height > 0) {
+        uint32_t pitch = (attribute->pitchInPixel > 0) ? attribute->pitchInPixel : attribute->width;
+        g_bufferSize = (size_t)pitch * (size_t)attribute->height * 4;
+    }
+    return HOOK_CONTINUE(sceVideoOutRegisterBuffers, int32_t (*)(int32_t, int32_t, void * const *, int32_t, const OrbisVideoOutBufferAttribute *), handle, startIndex, addresses, bufferNum, attribute);
+}
+
+// Wipe framebuffer to solid black before display flip when active (and menu is closed)
+int32_t sceVideoOutSubmitFlip_hook(int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg) {
+    if (g_pluginActive && !g_menuOpen && bufferIndex >= 0 && bufferIndex < MAX_VIDEO_BUFFERS) {
+        void *fb = g_bufferAddrs[bufferIndex];
+        if (fb && g_bufferSize > 0) {
+            memset(fb, 0x00, g_bufferSize);
+        }
+    }
+    return HOOK_CONTINUE(sceVideoOutSubmitFlip, int32_t (*)(int32_t, int32_t, uint32_t, int64_t), handle, bufferIndex, flipMode, flipArg);
+}
+
 static void process_pad_data(OrbisPadData *data) {
     if (!data || !data->connected) return;
 
@@ -120,12 +151,12 @@ static void process_pad_data(OrbisPadData *data) {
             g_menuOpen = false;
             g_waitingForBind = false;
         }
-        show_osd_status(g_pluginActive ? "FN Hide + Auto-Click: ON" : "FN Hide + Auto-Click: OFF");
+        show_osd_status(g_pluginActive ? "FN Blackout + Auto-Click: ON" : "FN Blackout + Auto-Click: OFF");
         data->buttons &= ~(BTN_L1 | BTN_DOWN);
         return;
     }
 
-    // 2. Toggle Menu Mode: L1 + R1
+    // 2. Toggle Menu Mode: L1 + R1 (temporarily reveals screen so you can configure)
     if ((raw & BTN_L1) && (newlyPressed & BTN_R1)) {
         g_menuOpen = !g_menuOpen;
         g_waitingForBind = false;
@@ -138,21 +169,18 @@ static void process_pad_data(OrbisPadData *data) {
         return;
     }
 
-    // 3. Menu Mode Navigation & Button Capture
+    // 3. Menu Mode Navigation & Interactive Button Capture
     if (g_menuOpen) {
-        // If user clicked X on "Target Button", capture the very next button pressed
         if (g_waitingForBind) {
             if (newlyPressed != 0) {
                 g_targetButton = newlyPressed;
                 g_waitingForBind = false;
                 show_menu_osd();
             }
-            // Block input from reaching Fortnite while binding
             data->buttons = 0;
             return;
         }
 
-        // Menu Navigation (Up / Down)
         if (newlyPressed & BTN_UP) {
             g_menuIndex = (g_menuIndex + 2) % 3;
             show_menu_osd();
@@ -161,20 +189,17 @@ static void process_pad_data(OrbisPadData *data) {
             show_menu_osd();
         }
 
-        // Select / Change Value
         if (g_menuIndex == 0 && (newlyPressed & BTN_CROSS)) {
-            // Click X to enter capture mode, then press Triangle (or any button)
             g_waitingForBind = true;
             show_menu_osd();
         } else if (g_menuIndex == 1 && ((newlyPressed & BTN_CROSS) || (newlyPressed & BTN_LEFT) || (newlyPressed & BTN_RIGHT))) {
-            // Toggle between Seconds and Milliseconds
             g_useMilliseconds = !g_useMilliseconds;
             if (!g_useMilliseconds && g_delayValue < 500) {
-                g_delayValue = 1000; // Default to 1.0s when switching back to seconds
+                g_delayValue = 1000;
             }
             show_menu_osd();
         } else if (g_menuIndex == 2) {
-            uint32_t step = g_useMilliseconds ? 50 : 500; // 50ms steps or 0.5s steps
+            uint32_t step = g_useMilliseconds ? 50 : 500;
             if ((newlyPressed & BTN_RIGHT) || ((raw & BTN_RIGHT) && (nowUs - g_lastMenuMoveUs > 150000))) {
                 g_delayValue += step;
                 if (g_delayValue > 60000) g_delayValue = 60000;
@@ -191,18 +216,16 @@ static void process_pad_data(OrbisPadData *data) {
             }
         }
 
-        // Block menu inputs from accidentally clicking things inside Fortnite
         data->buttons = 0;
         return;
     }
 
-    // 4. Auto-Clicker Execution (Works inside Fortnite game & menus)
+    // 4. Auto-Clicker Execution (60ms hold so Fortnite UE4 menus always register)
     if (g_pluginActive) {
         uint64_t intervalUs = (uint64_t)g_delayValue * 1000ULL;
         uint64_t elapsedUs = nowUs - g_lastClickTimeUs;
 
         if (elapsedUs >= intervalUs) {
-            // Hold the simulated button down for 60ms so Fortnite's UI registers the press cleanly
             data->buttons |= g_targetButton;
             if (elapsedUs >= intervalUs + 60000ULL) {
                 g_lastClickTimeUs = nowUs;
@@ -232,6 +255,8 @@ int scePadRead_hook(int32_t handle, OrbisPadData *data, int32_t num) {
 attr_public int module_start(size_t argc, const void *args) {
     HOOK(scePadReadState);
     HOOK(scePadRead);
+    HOOK(sceVideoOutRegisterBuffers);
+    HOOK(sceVideoOutSubmitFlip);
     g_lastClickTimeUs = sceKernelGetProcessTime();
     show_osd_status("fn_hide loaded: ON (L1+Down: Toggle | L1+R1: Menu)");
     return 0;
@@ -240,5 +265,7 @@ attr_public int module_start(size_t argc, const void *args) {
 attr_public int module_stop(size_t argc, const void *args) {
     UNHOOK(scePadReadState);
     UNHOOK(scePadRead);
+    UNHOOK(sceVideoOutRegisterBuffers);
+    UNHOOK(sceVideoOutSubmitFlip);
     return 0;
 }
