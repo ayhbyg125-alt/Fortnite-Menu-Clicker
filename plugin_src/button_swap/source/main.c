@@ -48,9 +48,15 @@ attr_public uint32_t g_pluginVersion = 0x00000200;
 #define MAX_HOLD_MS     10000u
 #define MAX_FB          16
 
-static volatile bool g_enabled = true;      /* ON from plugin start */
+static volatile bool g_enabled = false;     /* Armed state, persisted across title launches */
 static volatile bool g_menu = false;
 static volatile bool g_capture = false;
+static volatile bool g_isFortnite = false;
+static volatile bool g_padHooksInstalled = false;
+static volatile bool g_videoHooksInstalled = false;
+
+#define FN_TITLE_ID "CUSA07669"
+#define ARM_STATE_PATH "/data/GoldHEN/fn_menu_hider_state.bin"
 
 static int      g_sel = 0;
 static bool     g_unitMs = false;
@@ -84,6 +90,42 @@ static scePadReadState_t orig_scePadReadState;
 static scePadRead_t orig_scePadRead;
 static sceVideoOutRegisterBuffers_t orig_sceVideoOutRegisterBuffers;
 static sceVideoOutSubmitFlip_t orig_sceVideoOutSubmitFlip;
+
+static bool is_fortnite_process(void) {
+    OrbisAppInfo info;
+    memset(&info, 0, sizeof(info));
+
+    if (sceKernelGetAppInfo(getpid(), &info) != 0)
+        return false;
+
+    return strncmp(info.TitleId, FN_TITLE_ID, sizeof(info.TitleId)) == 0;
+}
+
+static void load_armed_state(void) {
+    int fd = sceKernelOpen(ARM_STATE_PATH, 0, 0);
+    uint8_t value = 0;
+
+    if (fd >= 0) {
+        if (sceKernelRead(fd, &value, sizeof(value)) == (ssize_t)sizeof(value))
+            g_enabled = value != 0;
+        sceKernelClose(fd);
+    }
+}
+
+static void save_armed_state(void) {
+    int fd = sceKernelOpen(ARM_STATE_PATH, 0x200 | 0x001, 0777);
+    uint8_t value = g_enabled ? 1u : 0u;
+
+    if (fd >= 0) {
+        (void)sceKernelWrite(fd, &value, sizeof(value));
+        sceKernelClose(fd);
+    }
+}
+
+static void reset_click_timers(uint64_t now) {
+    g_pressUntil = 0;
+    g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
+}
 
 static void notify(const char *msg) {
     OrbisNotificationRequest req;
@@ -197,9 +239,9 @@ static void handle_input(uint32_t phys, uint64_t now) {
         if (g_menu) {
             show_menu();
         } else {
-            g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
-            notify(g_enabled ? "Blackout + auto-click: ON"
-                             : "Blackout + auto-click: OFF");
+            reset_click_timers(now);
+            notify(g_enabled ? "Blackout + auto-click: ARMED"
+                             : "Blackout + auto-click: DISARMED");
         }
         return;
     }
@@ -274,11 +316,11 @@ static void handle_input(uint32_t phys, uint64_t now) {
     /* Global blackout + startup-click toggle: L1 + D-pad Down. */
     if (l1 && (pressed & BTN_DOWN)) {
         g_enabled = !g_enabled;
-        g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
-        g_pressUntil = 0;
+        reset_click_timers(now);
+        save_armed_state();
 
-        notify(g_enabled ? "Blackout + auto-click: ON"
-                         : "Blackout + auto-click: OFF");
+        notify(g_enabled ? "Blackout + auto-click: ARMED"
+                         : "Blackout + auto-click: DISARMED");
     }
 }
 
@@ -289,7 +331,7 @@ static uint32_t filter_buttons(uint32_t phys, uint64_t now) {
      */
     uint32_t out = phys;
 
-    if (g_enabled && !g_menu && !g_capture) {
+    if (g_isFortnite && g_enabled && !g_menu && !g_capture) {
         if (now >= g_nextClick) {
             g_pressUntil = now + (uint64_t)(g_holdMode ? g_holdMs : 10u) * 1000ull;
             g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
@@ -386,7 +428,8 @@ static int32_t hk_sceVideoOutSubmitFlip(
      * This is deliberately limited to the local display framebuffer.
      * No network/authentication/gameplay state is modified.
      */
-    if (g_enabled &&
+    if (g_isFortnite &&
+        g_enabled &&
         !g_menu &&
         !g_capture &&
         bufferIndex >= 0 &&
@@ -405,17 +448,21 @@ attr_public int module_start(size_t argc, const void *args) {
     (void)argc;
     (void)args;
 
-    g_enabled = true;
+    g_isFortnite = is_fortnite_process();
+    load_armed_state();
     g_menu = false;
     g_capture = false;
     g_prev = 0;
-    g_pressUntil = 0;
-    g_nextClick =
-        sceKernelGetProcessTime() + (uint64_t)g_intervalMs * 1000ull;
+    reset_click_timers(sceKernelGetProcessTime());
 
     /*
      * Detour_DetourFunction returns the original trampoline.
      * FunctionPtr MUST be uint64_t with this GoldHEN Detour API.
+     */
+    /*
+     * The pad hooks are needed globally so the armed state can be changed
+     * before launching Fortnite. Video hooks are title-gated because the
+     * framebuffer ABI belongs to the target title.
      */
     Detour_Construct(&g_dReadState, DetourMode_x64);
     orig_scePadReadState =
@@ -430,22 +477,29 @@ attr_public int module_start(size_t argc, const void *args) {
             &g_dRead,
             (uint64_t)scePadRead,
             (void *)hk_scePadRead);
+    g_padHooksInstalled = true;
 
-    Detour_Construct(&g_dRegisterBuffers, DetourMode_x64);
-    orig_sceVideoOutRegisterBuffers =
-        (sceVideoOutRegisterBuffers_t)Detour_DetourFunction(
-            &g_dRegisterBuffers,
-            (uint64_t)sceVideoOutRegisterBuffers,
-            (void *)hk_sceVideoOutRegisterBuffers);
+    if (g_isFortnite) {
+        Detour_Construct(&g_dRegisterBuffers, DetourMode_x64);
+        orig_sceVideoOutRegisterBuffers =
+            (sceVideoOutRegisterBuffers_t)Detour_DetourFunction(
+                &g_dRegisterBuffers,
+                (uint64_t)sceVideoOutRegisterBuffers,
+                (void *)hk_sceVideoOutRegisterBuffers);
 
-    Detour_Construct(&g_dSubmitFlip, DetourMode_x64);
-    orig_sceVideoOutSubmitFlip =
-        (sceVideoOutSubmitFlip_t)Detour_DetourFunction(
-            &g_dSubmitFlip,
-            (uint64_t)sceVideoOutSubmitFlip,
-            (void *)hk_sceVideoOutSubmitFlip);
+        Detour_Construct(&g_dSubmitFlip, DetourMode_x64);
+        orig_sceVideoOutSubmitFlip =
+            (sceVideoOutSubmitFlip_t)Detour_DetourFunction(
+                &g_dSubmitFlip,
+                (uint64_t)sceVideoOutSubmitFlip,
+                (void *)hk_sceVideoOutSubmitFlip);
+        g_videoHooksInstalled = true;
+    }
 
-    notify("FN Menu Hider: ON\nL1+Down toggle | L1+R1 menu");
+    notify(g_isFortnite
+        ? (g_enabled ? "FN Menu Hider: ARMED\nL1+Down toggle | L1+R1 menu"
+                     : "FN Menu Hider: DISARMED\nL1+Down toggle | L1+R1 menu")
+        : "FN Menu Hider: standby\nL1+Down arms/disarms");
     return 0;
 }
 
@@ -457,10 +511,17 @@ attr_public int module_stop(size_t argc, const void *args) {
     g_menu = false;
     g_capture = false;
 
-    Detour_Destroy(&g_dSubmitFlip);
-    Detour_Destroy(&g_dRegisterBuffers);
-    Detour_Destroy(&g_dRead);
-    Detour_Destroy(&g_dReadState);
+    if (g_videoHooksInstalled) {
+        Detour_Destroy(&g_dSubmitFlip);
+        Detour_Destroy(&g_dRegisterBuffers);
+        g_videoHooksInstalled = false;
+    }
+
+    if (g_padHooksInstalled) {
+        Detour_Destroy(&g_dRead);
+        Detour_Destroy(&g_dReadState);
+        g_padHooksInstalled = false;
+    }
 
     return 0;
 }
