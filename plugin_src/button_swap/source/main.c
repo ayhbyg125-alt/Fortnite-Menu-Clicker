@@ -400,21 +400,29 @@ static int32_t hk_sceVideoOutRegisterBuffers(
     if (ret >= 0 && addresses && attr &&
         attr->width > 0 && attr->height > 0) {
 
-        size_t pitch = (size_t)attr->pitch;
+        /*
+         * The OpenOrbis SDK's OrbisVideoOutBufferAttribute exposes width
+         * and height, but not a pitch member. Keep the calculation tied to
+         * the public structure actually used by this build.
+         *
+         * The framebuffer format used by Fortnite here is 32-bit RGBA/BGRA,
+         * so the linear byte span is width * height * 4.
+         */
+        size_t w = (size_t)attr->width;
         size_t h = (size_t)attr->height;
 
-        if (pitch == 0 || h == 0)
+        if (w == 0 || h == 0)
             return ret;
 
         /* Clear stale registrations before recording the new buffer set. */
         memset(g_fbAddr, 0, sizeof(g_fbAddr));
 
-        if (h > SIZE_MAX / 4u || pitch > SIZE_MAX / (h * 4u)) {
+        if (h > SIZE_MAX / 4u || w > SIZE_MAX / (h * 4u)) {
             g_fbSize = 0;
             return ret;
         }
 
-        g_fbSize = pitch * h * 4u;
+        g_fbSize = w * h * 4u;
 
         int32_t count = bufferNum;
         if (count > MAX_FB)
