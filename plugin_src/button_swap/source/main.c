@@ -101,7 +101,7 @@ static bool is_fortnite_process(void) {
     if (sceKernelGetAppInfo(getpid(), &info) != 0)
         return false;
 
-    return strncmp(info.title_id, FN_TITLE_ID, sizeof(info.title_id)) == 0;
+    return strncmp(info.TitleId, FN_TITLE_ID, sizeof(info.TitleId)) == 0;
 }
 
 static void load_armed_state(void) {
