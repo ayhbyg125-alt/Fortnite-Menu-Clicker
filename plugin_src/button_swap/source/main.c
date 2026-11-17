@@ -400,10 +400,13 @@ static int32_t hk_sceVideoOutRegisterBuffers(
     if (ret >= 0 && addresses && attr &&
         attr->width > 0 && attr->height > 0) {
 
-        size_t w = ((size_t)attr->width + 31u) & ~(size_t)31u;
-        size_t h = ((size_t)attr->height + 31u) & ~(size_t)31u;
+        size_t pitch = (size_t)attr->pitch;
+        size_t h = (size_t)attr->height;
 
-        g_fbSize = w * h * 4u;
+        if (pitch == 0 || h == 0)
+            return ret;
+
+        g_fbSize = pitch * h * 4u;
 
         for (int32_t i = 0; i < bufferNum; ++i) {
             int32_t idx = startIndex + i;
