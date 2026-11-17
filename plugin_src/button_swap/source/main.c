@@ -16,9 +16,7 @@
 #include <orbis/VideoOut.h>
 #include <GoldHEN.h>
 #include <Detour.h>
-
-/* libc declaration used to query this PRX's own process ID. */
-extern pid_t getpid(void);
+#include "plugin_common.h"
 
 #define attr_public __attribute__((visibility("default")))
 
@@ -95,13 +93,13 @@ static sceVideoOutRegisterBuffers_t orig_sceVideoOutRegisterBuffers;
 static sceVideoOutSubmitFlip_t orig_sceVideoOutSubmitFlip;
 
 static bool is_fortnite_process(void) {
-    OrbisAppInfo info;
-    memset(&info, 0, sizeof(info));
+    struct proc_info procInfo;
+    memset(&procInfo, 0, sizeof(procInfo));
 
-    if (sceKernelGetAppInfo(getpid(), &info) != 0)
+    if (sys_sdk_proc_info(&procInfo) != 0)
         return false;
 
-    return strncmp(info.TitleId, FN_TITLE_ID, sizeof(info.TitleId)) == 0;
+    return strncmp(procInfo.titleid, FN_TITLE_ID, sizeof(procInfo.titleid)) == 0;
 }
 
 static void load_armed_state(void) {
@@ -447,42 +445,26 @@ static int32_t hk_sceVideoOutSubmitFlip(
         handle, bufferIndex, flipMode, flipArg);
 }
 
-attr_public int module_start(size_t argc, const void *args) {
-    (void)argc;
-    (void)args;
+static void install_hooks(void) {
+    if (!g_padHooksInstalled) {
+        Detour_Construct(&g_dReadState, DetourMode_x64);
+        orig_scePadReadState =
+            (scePadReadState_t)Detour_DetourFunction(
+                &g_dReadState,
+                (uint64_t)scePadReadState,
+                (void *)hk_scePadReadState);
 
-    g_isFortnite = is_fortnite_process();
-    load_armed_state();
-    g_menu = false;
-    g_capture = false;
-    g_prev = 0;
-    reset_click_timers(sceKernelGetProcessTime());
+        Detour_Construct(&g_dRead, DetourMode_x64);
+        orig_scePadRead =
+            (scePadRead_t)Detour_DetourFunction(
+                &g_dRead,
+                (uint64_t)scePadRead,
+                (void *)hk_scePadRead);
 
-    /*
-     * Detour_DetourFunction returns the original trampoline.
-     * FunctionPtr MUST be uint64_t with this GoldHEN Detour API.
-     */
-    /*
-     * The pad hooks are needed globally so the armed state can be changed
-     * before launching Fortnite. Video hooks are title-gated because the
-     * framebuffer ABI belongs to the target title.
-     */
-    Detour_Construct(&g_dReadState, DetourMode_x64);
-    orig_scePadReadState =
-        (scePadReadState_t)Detour_DetourFunction(
-            &g_dReadState,
-            (uint64_t)scePadReadState,
-            (void *)hk_scePadReadState);
+        g_padHooksInstalled = true;
+    }
 
-    Detour_Construct(&g_dRead, DetourMode_x64);
-    orig_scePadRead =
-        (scePadRead_t)Detour_DetourFunction(
-            &g_dRead,
-            (uint64_t)scePadRead,
-            (void *)hk_scePadRead);
-    g_padHooksInstalled = true;
-
-    if (g_isFortnite) {
+    if (g_isFortnite && !g_videoHooksInstalled) {
         Detour_Construct(&g_dRegisterBuffers, DetourMode_x64);
         orig_sceVideoOutRegisterBuffers =
             (sceVideoOutRegisterBuffers_t)Detour_DetourFunction(
@@ -496,35 +478,75 @@ attr_public int module_start(size_t argc, const void *args) {
                 &g_dSubmitFlip,
                 (uint64_t)sceVideoOutSubmitFlip,
                 (void *)hk_sceVideoOutSubmitFlip);
+
         g_videoHooksInstalled = true;
     }
-
-    notify(g_isFortnite
-        ? (g_enabled ? "FN Menu Hider: ARMED\nL1+Down toggle | L1+R1 menu"
-                     : "FN Menu Hider: DISARMED\nL1+Down toggle | L1+R1 menu")
-        : "FN Menu Hider: standby\nL1+Down arms/disarms");
-    return 0;
 }
 
-attr_public int module_stop(size_t argc, const void *args) {
-    (void)argc;
-    (void)args;
-
-    g_enabled = false;
-    g_menu = false;
-    g_capture = false;
-
+static void uninstall_hooks(void) {
     if (g_videoHooksInstalled) {
         Detour_Destroy(&g_dSubmitFlip);
         Detour_Destroy(&g_dRegisterBuffers);
         g_videoHooksInstalled = false;
+        orig_sceVideoOutSubmitFlip = NULL;
+        orig_sceVideoOutRegisterBuffers = NULL;
     }
 
     if (g_padHooksInstalled) {
         Detour_Destroy(&g_dRead);
         Detour_Destroy(&g_dReadState);
         g_padHooksInstalled = false;
+        orig_scePadRead = NULL;
+        orig_scePadReadState = NULL;
     }
+}
 
+/*
+ * GoldHEN's plugin loader calls plugin_load/plugin_unload for plugins.
+ * Keep module_start/module_stop inert so the loader has one well-defined
+ * lifecycle and title detection happens inside the process where the
+ * loader actually invoked the plugin.
+ */
+attr_public int plugin_load(int argc, const char *argv[]) {
+    (void)argc;
+    (void)argv;
+
+    g_isFortnite = is_fortnite_process();
+    load_armed_state();
+    g_menu = false;
+    g_capture = false;
+    g_prev = 0;
+    reset_click_timers(sceKernelGetProcessTime());
+
+    install_hooks();
+
+    notify(g_isFortnite
+        ? (g_enabled ? "FN Menu Hider: ARMED\nL1+Down toggle | L1+R1 menu"
+                     : "FN Menu Hider: DISARMED\nL1+Down toggle | L1+R1 menu")
+        : "FN Menu Hider: standby\nL1+Down arms/disarms");
+
+    return 0;
+}
+
+attr_public int plugin_unload(int argc, const char *argv[]) {
+    (void)argc;
+    (void)argv;
+
+    uninstall_hooks();
+    g_menu = false;
+    g_capture = false;
+
+    return 0;
+}
+
+attr_module_hidden int module_start(size_t argc, const void *args) {
+    (void)argc;
+    (void)args;
+    return 0;
+}
+
+attr_module_hidden int module_stop(size_t argc, const void *args) {
+    (void)argc;
+    (void)args;
     return 0;
 }
