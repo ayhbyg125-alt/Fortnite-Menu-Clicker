@@ -56,6 +56,7 @@ static int      g_sel = 0;
 static bool     g_unitMs = false;
 static uint32_t g_intervalMs = 2000;
 static uint32_t g_holdMs = 60;
+static bool     g_holdMode = false; /* false = tap, true = hold */
 static uint32_t g_target = BTN_CROSS;
 
 static uint32_t g_prev = 0;
@@ -121,6 +122,7 @@ static void show_menu(void) {
              "%s Target: Cross (X)\n"
              "%s Unit: %s\n"
              "%s Repeat delay: %s\n"
+             "%s X action: %s\n"
              "%s X press time: %s\n"
              "(Up/Down select, Left/Right adjust, L1+R1 close)",
              g_sel == 0 ? ">" : " ",
@@ -129,6 +131,8 @@ static void show_menu(void) {
              g_sel == 2 ? ">" : " ",
              delay,
              g_sel == 3 ? ">" : " ",
+             g_holdMode ? "Hold" : "Tap",
+             g_sel == 4 ? ">" : " ",
              hold);
     notify(buf);
 }
@@ -145,6 +149,10 @@ static void adjust_repeat_delay(int dir) {
         if (s > 600) s = 600;
         g_intervalMs = (uint32_t)s * 1000u;
     }
+}
+
+static void toggle_hold_mode(void) {
+    g_holdMode = !g_holdMode;
 }
 
 static void adjust_hold_time(int dir) {
@@ -209,11 +217,11 @@ static void handle_input(uint32_t phys, uint64_t now) {
         bool changed = false;
 
         if (pressed & BTN_UP) {
-            g_sel = (g_sel + 3) % 4;
+            g_sel = (g_sel + 4) % 5;
             changed = true;
         }
         if (pressed & BTN_DOWN) {
-            g_sel = (g_sel + 1) % 4;
+            g_sel = (g_sel + 1) % 5;
             changed = true;
         }
 
@@ -232,6 +240,9 @@ static void handle_input(uint32_t phys, uint64_t now) {
                 adjust_repeat_delay(-1);
                 changed = true;
             } else if (g_sel == 3) {
+                toggle_hold_mode();
+                changed = true;
+            } else if (g_sel == 4) {
                 adjust_hold_time(-1);
                 changed = true;
             } else if (g_sel == 1) {
@@ -245,6 +256,9 @@ static void handle_input(uint32_t phys, uint64_t now) {
                 adjust_repeat_delay(+1);
                 changed = true;
             } else if (g_sel == 3) {
+                toggle_hold_mode();
+                changed = true;
+            } else if (g_sel == 4) {
                 adjust_hold_time(+1);
                 changed = true;
             } else if (g_sel == 1) {
@@ -277,7 +291,7 @@ static uint32_t filter_buttons(uint32_t phys, uint64_t now) {
 
     if (g_enabled && !g_menu && !g_capture) {
         if (now >= g_nextClick) {
-            g_pressUntil = now + (uint64_t)g_holdMs * 1000ull;
+            g_pressUntil = now + (uint64_t)(g_holdMode ? g_holdMs : 10u) * 1000ull;
             g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
         }
 
