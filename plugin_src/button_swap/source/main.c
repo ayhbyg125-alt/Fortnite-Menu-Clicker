@@ -42,9 +42,10 @@ attr_public uint32_t g_pluginVersion = 0x00000200;
 #define BTN_SQUARE    0x00008000u
 #define BTN_TOUCHPAD  0x00100000u
 
-#define HOLD_US         60000ull
 #define MIN_INTERVAL_MS 100u
 #define MAX_INTERVAL_MS 600000u
+#define MIN_HOLD_MS     10u
+#define MAX_HOLD_MS     10000u
 #define MAX_FB          16
 
 static volatile bool g_enabled = true;      /* ON from plugin start */
@@ -54,6 +55,7 @@ static volatile bool g_capture = false;
 static int      g_sel = 0;
 static bool     g_unitMs = false;
 static uint32_t g_intervalMs = 2000;
+static uint32_t g_holdMs = 60;
 static uint32_t g_target = BTN_CROSS;
 
 static uint32_t g_prev = 0;
@@ -93,8 +95,9 @@ static void notify(const char *msg) {
 }
 
 static void show_menu(void) {
-    char buf[320];
+    char buf[384];
     char delay[32];
+    char hold[32];
 
     if (g_capture) {
         snprintf(buf, sizeof(buf),
@@ -103,27 +106,34 @@ static void show_menu(void) {
         return;
     }
 
-    if (g_unitMs)
+    if (g_unitMs) {
         snprintf(delay, sizeof(delay), "%u ms", (unsigned)g_intervalMs);
-    else
+        snprintf(hold, sizeof(hold), "%u ms", (unsigned)g_holdMs);
+    } else {
         snprintf(delay, sizeof(delay), "%u s",
                  (unsigned)(g_intervalMs / 1000u));
+        snprintf(hold, sizeof(hold), "%u s",
+                 (unsigned)((g_holdMs + 500u) / 1000u));
+    }
 
     snprintf(buf, sizeof(buf),
              "== AUTO CLICKER MENU ==\n"
              "%s Target: Cross (X)\n"
              "%s Unit: %s\n"
-             "%s Delay: %s\n"
+             "%s Repeat delay: %s\n"
+             "%s X press time: %s\n"
              "(Up/Down select, Left/Right adjust, L1+R1 close)",
              g_sel == 0 ? ">" : " ",
              g_sel == 1 ? ">" : " ",
              g_unitMs ? "ms" : "s",
              g_sel == 2 ? ">" : " ",
-             delay);
+             delay,
+             g_sel == 3 ? ">" : " ",
+             hold);
     notify(buf);
 }
 
-static void adjust_delay(int dir) {
+static void adjust_repeat_delay(int dir) {
     if (g_unitMs) {
         int64_t v = (int64_t)g_intervalMs + (int64_t)dir * 50;
         if (v < MIN_INTERVAL_MS) v = MIN_INTERVAL_MS;
@@ -134,6 +144,20 @@ static void adjust_delay(int dir) {
         if (s < 1) s = 1;
         if (s > 600) s = 600;
         g_intervalMs = (uint32_t)s * 1000u;
+    }
+}
+
+static void adjust_hold_time(int dir) {
+    if (g_unitMs) {
+        int64_t v = (int64_t)g_holdMs + (int64_t)dir * 10;
+        if (v < MIN_HOLD_MS) v = MIN_HOLD_MS;
+        if (v > MAX_HOLD_MS) v = MAX_HOLD_MS;
+        g_holdMs = (uint32_t)v;
+    } else {
+        int64_t s = (int64_t)((g_holdMs + 500u) / 1000u) + dir;
+        if (s < 1) s = 1;
+        if (s > 10) s = 10;
+        g_holdMs = (uint32_t)s * 1000u;
     }
 }
 
@@ -185,11 +209,11 @@ static void handle_input(uint32_t phys, uint64_t now) {
         bool changed = false;
 
         if (pressed & BTN_UP) {
-            g_sel = (g_sel + 2) % 3;
+            g_sel = (g_sel + 3) % 4;
             changed = true;
         }
         if (pressed & BTN_DOWN) {
-            g_sel = (g_sel + 1) % 3;
+            g_sel = (g_sel + 1) % 4;
             changed = true;
         }
 
@@ -205,7 +229,10 @@ static void handle_input(uint32_t phys, uint64_t now) {
 
         if (pressed & BTN_LEFT) {
             if (g_sel == 2) {
-                adjust_delay(-1);
+                adjust_repeat_delay(-1);
+                changed = true;
+            } else if (g_sel == 3) {
+                adjust_hold_time(-1);
                 changed = true;
             } else if (g_sel == 1) {
                 toggle_unit();
@@ -215,7 +242,10 @@ static void handle_input(uint32_t phys, uint64_t now) {
 
         if (pressed & BTN_RIGHT) {
             if (g_sel == 2) {
-                adjust_delay(+1);
+                adjust_repeat_delay(+1);
+                changed = true;
+            } else if (g_sel == 3) {
+                adjust_hold_time(+1);
                 changed = true;
             } else if (g_sel == 1) {
                 toggle_unit();
@@ -247,7 +277,7 @@ static uint32_t filter_buttons(uint32_t phys, uint64_t now) {
 
     if (g_enabled && !g_menu && !g_capture) {
         if (now >= g_nextClick) {
-            g_pressUntil = now + HOLD_US;
+            g_pressUntil = now + (uint64_t)g_holdMs * 1000ull;
             g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
         }
 
