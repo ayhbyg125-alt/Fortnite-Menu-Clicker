@@ -507,7 +507,7 @@ static void uninstall_hooks(void) {
  * lifecycle and title detection happens inside the process where the
  * loader actually invoked the plugin.
  */
-attr_public int plugin_load(int argc, const char *argv[]) {
+attr_public int plugin_load(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
@@ -528,7 +528,7 @@ attr_public int plugin_load(int argc, const char *argv[]) {
     return 0;
 }
 
-attr_public int plugin_unload(int argc, const char *argv[]) {
+attr_public int plugin_unload(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
