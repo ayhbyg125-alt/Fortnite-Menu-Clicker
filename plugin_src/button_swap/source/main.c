@@ -406,9 +406,23 @@ static int32_t hk_sceVideoOutRegisterBuffers(
         if (pitch == 0 || h == 0)
             return ret;
 
+        /* Clear stale registrations before recording the new buffer set. */
+        memset(g_fbAddr, 0, sizeof(g_fbAddr));
+
+        if (h > SIZE_MAX / 4u || pitch > SIZE_MAX / (h * 4u)) {
+            g_fbSize = 0;
+            return ret;
+        }
+
         g_fbSize = pitch * h * 4u;
 
-        for (int32_t i = 0; i < bufferNum; ++i) {
+        int32_t count = bufferNum;
+        if (count > MAX_FB)
+            count = MAX_FB;
+        if (count < 0)
+            count = 0;
+
+        for (int32_t i = 0; i < count; ++i) {
             int32_t idx = startIndex + i;
 
             if (idx >= 0 && idx < MAX_FB)
