@@ -1,5 +1,5 @@
 // Fortnite Menu Hider - diagnostic GoldHEN plugin
-// Safe test build: menu/notifications + Fortnite framebuffer blackout.
+// Global-load test build: Fortnite framebuffer rectangle + diagnostic menu.
 // This build intentionally does NOT synthesize controller input.
 
 #include <stdint.h>
@@ -18,9 +18,9 @@
 #define attr_public __attribute__((visibility("default")))
 
 attr_public const char *g_pluginName = "button_swap";
-attr_public const char *g_pluginDesc = "Fortnite framebuffer blackout + diagnostic menu";
+attr_public const char *g_pluginDesc = "Fortnite framebuffer rectangle + diagnostic menu";
 attr_public const char *g_pluginAuth = "Fortnite-Menu-Hider";
-attr_public uint32_t g_pluginVersion = 0x00000300;
+attr_public uint32_t g_pluginVersion = 0x00000400;
 
 #define BTN_UP        0x00000010u
 #define BTN_RIGHT     0x00000020u
@@ -35,6 +35,13 @@ attr_public uint32_t g_pluginVersion = 0x00000300;
 #define ARM_STATE_PATH "/data/GoldHEN/fn_menu_hider_state.bin"
 #define MAX_FB 16
 
+/* Conservative test rectangle. These are deliberately compile-time constants
+ * until the actual framebuffer format/layout is confirmed on hardware. */
+#define RECT_X       0u
+#define RECT_Y       0u
+#define RECT_WIDTH   320u
+#define RECT_HEIGHT  120u
+
 static volatile bool g_enabled = false;
 static volatile bool g_menu = false;
 static volatile bool g_isFortnite = false;
@@ -46,6 +53,8 @@ static uint32_t g_prev = 0;
 
 static void *g_fbAddr[MAX_FB];
 static size_t g_fbSize = 0;
+static size_t g_fbWidth = 0;
+static size_t g_fbHeight = 0;
 
 typedef int (*scePadReadState_t)(int32_t, OrbisPadData *);
 typedef int (*scePadRead_t)(int32_t, OrbisPadData *, int32_t);
@@ -111,8 +120,9 @@ static void show_menu(void) {
 
     snprintf(buf, sizeof(buf),
         "== FN MENU HIDER ==\n"
-        "%s Blackout: %s\n"
+        "%s Rectangle: %s\n"
         "%s Status: %s\n"
+        "320x120 at top-left\n"
         "Up/Down select | X toggle | O close\n"
         "L1+R1 open/close",
         g_sel == 0 ? ">" : " ",
@@ -137,21 +147,21 @@ static void handle_input(uint32_t phys) {
             show_menu();
         } else {
             notify(g_enabled
-                ? "FN Menu Hider: BLACKOUT ON"
-                : "FN Menu Hider: BLACKOUT OFF");
+                ? "FN Menu Hider: RECTANGLE ON"
+                : "FN Menu Hider: RECTANGLE OFF");
         }
         return;
     }
 
     if (!g_menu) {
-        /* Home-screen arm/disarm shortcut. No synthetic game input. */
+        /* Observe Home/controller input only; never rewrite the pad data. */
         if (l1 && (pressed & BTN_DOWN)) {
             g_enabled = !g_enabled;
             save_armed_state();
 
             notify(g_enabled
-                ? "FN Menu Hider: BLACKOUT ARMED"
-                : "FN Menu Hider: BLACKOUT DISARMED");
+                ? "FN Menu Hider: RECTANGLE ARMED"
+                : "FN Menu Hider: RECTANGLE DISARMED");
         }
         return;
     }
@@ -210,6 +220,43 @@ static int hk_scePadRead(int32_t handle, OrbisPadData *data, int32_t count) {
     return ret;
 }
 
+static void draw_rectangle(uint8_t *fb) {
+    if (!fb || !g_fbSize || !g_fbWidth || !g_fbHeight)
+        return;
+
+    size_t x0 = RECT_X;
+    size_t y0 = RECT_Y;
+    size_t x1 = x0 + RECT_WIDTH;
+    size_t y1 = y0 + RECT_HEIGHT;
+
+    if (x0 >= g_fbWidth || y0 >= g_fbHeight)
+        return;
+
+    if (x1 > g_fbWidth)
+        x1 = g_fbWidth;
+    if (y1 > g_fbHeight)
+        y1 = g_fbHeight;
+
+    /*
+     * The existing blackout path already relies on a 4-byte linear
+     * framebuffer. Preserve that known assumption for this first rectangle
+     * test rather than introducing an unverified pixel-format conversion.
+     */
+    for (size_t y = y0; y < y1; ++y) {
+        size_t row_offset = y * g_fbWidth * 4u;
+        size_t rect_offset = row_offset + x0 * 4u;
+        size_t rect_bytes = (x1 - x0) * 4u;
+
+        if (rect_offset >= g_fbSize)
+            break;
+
+        if (rect_bytes > g_fbSize - rect_offset)
+            rect_bytes = g_fbSize - rect_offset;
+
+        memset(fb + rect_offset, 0, rect_bytes);
+    }
+}
+
 static int32_t hk_sceVideoOutRegisterBuffers(
     int32_t handle,
     int32_t startIndex,
@@ -231,10 +278,14 @@ static int32_t hk_sceVideoOutRegisterBuffers(
 
         if (h > SIZE_MAX / 4u || w > SIZE_MAX / (h * 4u)) {
             g_fbSize = 0;
+            g_fbWidth = 0;
+            g_fbHeight = 0;
             memset(g_fbAddr, 0, sizeof(g_fbAddr));
             return ret;
         }
 
+        g_fbWidth = w;
+        g_fbHeight = h;
         g_fbSize = w * h * 4u;
         memset(g_fbAddr, 0, sizeof(g_fbAddr));
 
@@ -269,7 +320,7 @@ static int32_t hk_sceVideoOutSubmitFlip(
         g_fbAddr[bufferIndex] &&
         g_fbSize) {
 
-        memset(g_fbAddr[bufferIndex], 0, g_fbSize);
+        draw_rectangle((uint8_t *)g_fbAddr[bufferIndex]);
     }
 
     return orig_sceVideoOutSubmitFlip(
@@ -340,11 +391,15 @@ attr_public int plugin_load(int argc, char **argv) {
     load_armed_state();
     g_menu = false;
     g_prev = 0;
+    g_fbSize = 0;
+    g_fbWidth = 0;
+    g_fbHeight = 0;
+    memset(g_fbAddr, 0, sizeof(g_fbAddr));
 
     install_hooks();
 
     notify(g_isFortnite
-        ? "FN Menu Hider: LOADED\nL1+R1 = menu | L1+Down = blackout"
+        ? "FN Menu Hider: LOADED\nL1+R1 = menu | L1+Down = rectangle"
         : "FN Menu Hider: STANDBY\nL1+Down = arm/disarm");
 
     return 0;
@@ -357,6 +412,10 @@ attr_public int plugin_unload(int argc, char **argv) {
     uninstall_hooks();
     g_menu = false;
     g_prev = 0;
+    g_fbSize = 0;
+    g_fbWidth = 0;
+    g_fbHeight = 0;
+    memset(g_fbAddr, 0, sizeof(g_fbAddr));
 
     return 0;
 }
