@@ -1,9 +1,6 @@
-// plugin_src/button_swap/source/main.c
-// Fortnite Menu Hider - fullscreen framebuffer blackout + startup auto-click
-// Local GoldHEN plugin. Blackout is controlled independently from input.
-//
-// Important: Detour_DetourFunction() returns the original trampoline.
-// Do not use Detour_Call().
+// Fortnite Menu Hider - diagnostic GoldHEN plugin
+// Safe test build: menu/notifications + Fortnite framebuffer blackout.
+// This build intentionally does NOT synthesize controller input.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -21,57 +18,33 @@
 #define attr_public __attribute__((visibility("default")))
 
 attr_public const char *g_pluginName = "button_swap";
-attr_public const char *g_pluginDesc = "Fullscreen blackout + startup auto-click";
+attr_public const char *g_pluginDesc = "Fortnite framebuffer blackout + diagnostic menu";
 attr_public const char *g_pluginAuth = "Fortnite-Menu-Hider";
-attr_public uint32_t g_pluginVersion = 0x00000200;
+attr_public uint32_t g_pluginVersion = 0x00000300;
 
-/* PS4 pad masks. */
-#define BTN_L3        0x00000002u
-#define BTN_R3        0x00000004u
-#define BTN_OPTIONS   0x00000008u
 #define BTN_UP        0x00000010u
 #define BTN_RIGHT     0x00000020u
 #define BTN_DOWN      0x00000040u
 #define BTN_LEFT      0x00000080u
-#define BTN_L2        0x00000100u
-#define BTN_R2        0x00000200u
 #define BTN_L1        0x00000400u
 #define BTN_R1        0x00000800u
-#define BTN_TRIANGLE  0x00001000u
-#define BTN_CIRCLE    0x00002000u
 #define BTN_CROSS     0x00004000u
-#define BTN_SQUARE    0x00008000u
-#define BTN_TOUCHPAD  0x00100000u
+#define BTN_CIRCLE    0x00002000u
 
-#define MIN_INTERVAL_MS 100u
-#define MAX_INTERVAL_MS 600000u
-#define MIN_HOLD_MS     10u
-#define MAX_HOLD_MS     10000u
-#define MAX_FB          16
+#define FN_TITLE_ID "CUSA07669"
+#define ARM_STATE_PATH "/data/GoldHEN/fn_menu_hider_state.bin"
+#define MAX_FB 16
 
-static volatile bool g_enabled = false;     /* Armed state, persisted across title launches */
+static volatile bool g_enabled = false;
 static volatile bool g_menu = false;
-static volatile bool g_capture = false;
 static volatile bool g_isFortnite = false;
 static volatile bool g_padHooksInstalled = false;
 static volatile bool g_videoHooksInstalled = false;
 
-#define FN_TITLE_ID "CUSA07669"
-#define ARM_STATE_PATH "/data/GoldHEN/fn_menu_hider_state.bin"
-
-static int      g_sel = 0;
-static bool     g_unitMs = false;
-static uint32_t g_intervalMs = 2000;
-static uint32_t g_holdMs = 60;
-static bool     g_holdMode = false; /* false = tap, true = hold */
-static uint32_t g_target = BTN_CROSS;
-
+static int g_sel = 0;
 static uint32_t g_prev = 0;
-static uint64_t g_nextClick = 0;
-static uint64_t g_pressUntil = 0;
 
-/* Registered video framebuffer addresses. */
-static void  *g_fbAddr[MAX_FB];
+static void *g_fbAddr[MAX_FB];
 static size_t g_fbSize = 0;
 
 typedef int (*scePadReadState_t)(int32_t, OrbisPadData *);
@@ -102,6 +75,16 @@ static bool is_fortnite_process(void) {
     return strncmp(procInfo.titleid, FN_TITLE_ID, sizeof(procInfo.titleid)) == 0;
 }
 
+static void notify(const char *msg) {
+    OrbisNotificationRequest req;
+    memset(&req, 0, sizeof(req));
+    req.type = 0;
+    req.targetId = -1;
+    req.useIconImageUri = 0;
+    strncpy(req.message, msg, sizeof(req.message) - 1);
+    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+}
+
 static void load_armed_state(void) {
     int fd = sceKernelOpen(ARM_STATE_PATH, 0, 0);
     uint8_t value = 0;
@@ -123,226 +106,80 @@ static void save_armed_state(void) {
     }
 }
 
-static void reset_click_timers(uint64_t now) {
-    g_pressUntil = 0;
-    g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
-}
-
-static void notify(const char *msg) {
-    OrbisNotificationRequest req;
-    memset(&req, 0, sizeof(req));
-    req.type = 0;
-    req.targetId = -1;
-    req.useIconImageUri = 0;
-    strncpy(req.message, msg, sizeof(req.message) - 1);
-    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-}
-
 static void show_menu(void) {
     char buf[384];
-    char delay[32];
-    char hold[32];
-
-    if (g_capture) {
-        snprintf(buf, sizeof(buf),
-                 "== AUTO CLICKER ==\nPRESS ANY BUTTON TO BIND...");
-        notify(buf);
-        return;
-    }
-
-    if (g_unitMs) {
-        snprintf(delay, sizeof(delay), "%u ms", (unsigned)g_intervalMs);
-        snprintf(hold, sizeof(hold), "%u ms", (unsigned)g_holdMs);
-    } else {
-        snprintf(delay, sizeof(delay), "%u s",
-                 (unsigned)(g_intervalMs / 1000u));
-        snprintf(hold, sizeof(hold), "%u s",
-                 (unsigned)((g_holdMs + 500u) / 1000u));
-    }
 
     snprintf(buf, sizeof(buf),
-             "== AUTO CLICKER MENU ==\n"
-             "%s Target: Cross (X)\n"
-             "%s Unit: %s\n"
-             "%s Repeat delay: %s\n"
-             "%s X action: %s\n"
-             "%s X press time: %s\n"
-             "(Up/Down select, Left/Right adjust, L1+R1 close)",
-             g_sel == 0 ? ">" : " ",
-             g_sel == 1 ? ">" : " ",
-             g_unitMs ? "ms" : "s",
-             g_sel == 2 ? ">" : " ",
-             delay,
-             g_sel == 3 ? ">" : " ",
-             g_holdMode ? "Hold" : "Tap",
-             g_sel == 4 ? ">" : " ",
-             hold);
+        "== FN MENU HIDER ==\n"
+        "%s Blackout: %s\n"
+        "%s Status: %s\n"
+        "Up/Down select | X toggle | O close\n"
+        "L1+R1 open/close",
+        g_sel == 0 ? ">" : " ",
+        g_enabled ? "ON" : "OFF",
+        g_sel == 1 ? ">" : " ",
+        g_isFortnite ? "FORTNITE" : "STANDBY");
+
     notify(buf);
 }
 
-static void adjust_repeat_delay(int dir) {
-    if (g_unitMs) {
-        int64_t v = (int64_t)g_intervalMs + (int64_t)dir * 50;
-        if (v < MIN_INTERVAL_MS) v = MIN_INTERVAL_MS;
-        if (v > MAX_INTERVAL_MS) v = MAX_INTERVAL_MS;
-        g_intervalMs = (uint32_t)v;
-    } else {
-        int64_t s = (int64_t)(g_intervalMs / 1000u) + dir;
-        if (s < 1) s = 1;
-        if (s > 600) s = 600;
-        g_intervalMs = (uint32_t)s * 1000u;
-    }
-}
-
-static void toggle_hold_mode(void) {
-    g_holdMode = !g_holdMode;
-}
-
-static void adjust_hold_time(int dir) {
-    if (g_unitMs) {
-        int64_t v = (int64_t)g_holdMs + (int64_t)dir * 10;
-        if (v < MIN_HOLD_MS) v = MIN_HOLD_MS;
-        if (v > MAX_HOLD_MS) v = MAX_HOLD_MS;
-        g_holdMs = (uint32_t)v;
-    } else {
-        int64_t s = (int64_t)((g_holdMs + 500u) / 1000u) + dir;
-        if (s < 1) s = 1;
-        if (s > 10) s = 10;
-        g_holdMs = (uint32_t)s * 1000u;
-    }
-}
-
-static void toggle_unit(void) {
-    g_unitMs = !g_unitMs;
-
-    if (!g_unitMs) {
-        uint32_t s = (g_intervalMs + 500u) / 1000u;
-        if (s < 1) s = 1;
-        g_intervalMs = s * 1000u;
-    }
-}
-
-/*
- * Input state is observed, not consumed, while blackout/autoclick is active.
- * The menu is the only state that intentionally suppresses game input.
- */
-static void handle_input(uint32_t phys, uint64_t now) {
+static void handle_input(uint32_t phys) {
     uint32_t pressed = phys & ~g_prev;
     g_prev = phys;
 
-    const bool l1 = (phys & BTN_L1) != 0;
-    const bool r1 = (phys & BTN_R1) != 0;
+    bool l1 = (phys & BTN_L1) != 0;
+    bool r1 = (phys & BTN_R1) != 0;
 
     if (l1 && r1 && (pressed & (BTN_L1 | BTN_R1))) {
-        if (g_capture) g_capture = false;
         g_menu = !g_menu;
 
         if (g_menu) {
             show_menu();
         } else {
-            reset_click_timers(now);
-            notify(g_enabled ? "Blackout + auto-click: ARMED"
-                             : "Blackout + auto-click: DISARMED");
+            notify(g_enabled
+                ? "FN Menu Hider: BLACKOUT ON"
+                : "FN Menu Hider: BLACKOUT OFF");
         }
         return;
     }
 
-    if (g_menu && g_capture) {
-        if (pressed & BTN_CROSS) {
-            g_target = BTN_CROSS;
-            g_capture = false;
-            show_menu();
+    if (!g_menu) {
+        /* Home-screen arm/disarm shortcut. No synthetic game input. */
+        if (l1 && (pressed & BTN_DOWN)) {
+            g_enabled = !g_enabled;
+            save_armed_state();
+
+            notify(g_enabled
+                ? "FN Menu Hider: BLACKOUT ARMED"
+                : "FN Menu Hider: BLACKOUT DISARMED");
         }
         return;
     }
 
-    if (g_menu) {
-        bool changed = false;
+    if (pressed & BTN_UP) {
+        g_sel = (g_sel + 1) % 2;
+        show_menu();
+    }
 
-        if (pressed & BTN_UP) {
-            g_sel = (g_sel + 4) % 5;
-            changed = true;
-        }
-        if (pressed & BTN_DOWN) {
-            g_sel = (g_sel + 1) % 5;
-            changed = true;
-        }
+    if (pressed & BTN_DOWN) {
+        g_sel = (g_sel + 1) % 2;
+        show_menu();
+    }
 
-        if (pressed & BTN_CROSS) {
-            if (g_sel == 0) {
-                g_capture = true;
-                changed = true;
-            } else if (g_sel == 1) {
-                toggle_unit();
-                changed = true;
-            }
-        }
-
-        if (pressed & BTN_LEFT) {
-            if (g_sel == 2) {
-                adjust_repeat_delay(-1);
-                changed = true;
-            } else if (g_sel == 3) {
-                toggle_hold_mode();
-                changed = true;
-            } else if (g_sel == 4) {
-                adjust_hold_time(-1);
-                changed = true;
-            } else if (g_sel == 1) {
-                toggle_unit();
-                changed = true;
-            }
-        }
-
-        if (pressed & BTN_RIGHT) {
-            if (g_sel == 2) {
-                adjust_repeat_delay(+1);
-                changed = true;
-            } else if (g_sel == 3) {
-                toggle_hold_mode();
-                changed = true;
-            } else if (g_sel == 4) {
-                adjust_hold_time(+1);
-                changed = true;
-            } else if (g_sel == 1) {
-                toggle_unit();
-                changed = true;
-            }
-        }
-
-        if (changed) show_menu();
+    if (pressed & BTN_CIRCLE) {
+        g_menu = false;
+        notify("FN Menu Hider: MENU CLOSED");
         return;
     }
 
-    /* Global blackout + startup-click toggle: L1 + D-pad Down. */
-    if (l1 && (pressed & BTN_DOWN)) {
-        g_enabled = !g_enabled;
-        reset_click_timers(now);
-        save_armed_state();
-
-        notify(g_enabled ? "Blackout + auto-click: ARMED"
-                         : "Blackout + auto-click: DISARMED");
-    }
-}
-
-static uint32_t filter_buttons(uint32_t phys, uint64_t now) {
-    /*
-     * Keep ordinary Fortnite input intact when the menu is closed.
-     * The synthetic target button is only added for the timed startup click.
-     */
-    uint32_t out = phys;
-
-    if (g_isFortnite && g_enabled && !g_menu && !g_capture) {
-        if (now >= g_nextClick) {
-            g_pressUntil = now + (uint64_t)(g_holdMode ? g_holdMs : 10u) * 1000ull;
-            g_nextClick = now + (uint64_t)g_intervalMs * 1000ull;
+    if (pressed & BTN_CROSS) {
+        if (g_sel == 0) {
+            g_enabled = !g_enabled;
+            save_armed_state();
         }
 
-        if (now < g_pressUntil)
-            out |= g_target;
+        show_menu();
     }
-
-    return out;
 }
 
 static int hk_scePadReadState(int32_t handle, OrbisPadData *data) {
@@ -351,11 +188,8 @@ static int hk_scePadReadState(int32_t handle, OrbisPadData *data) {
 
     int ret = orig_scePadReadState(handle, data);
 
-    if (ret == 0 && data && data->connected) {
-        uint64_t now = sceKernelGetProcessTime();
-        handle_input(data->buttons, now);
-        data->buttons = filter_buttons(data->buttons, now);
-    }
+    if (ret == 0 && data && data->connected)
+        handle_input(data->buttons);
 
     return ret;
 }
@@ -367,23 +201,15 @@ static int hk_scePadRead(int32_t handle, OrbisPadData *data, int32_t count) {
     int ret = orig_scePadRead(handle, data, count);
 
     if (ret > 0 && data) {
-        uint64_t now = sceKernelGetProcessTime();
-
         for (int32_t i = 0; i < ret; ++i) {
-            if (data[i].connected) {
-                handle_input(data[i].buttons, now);
-                data[i].buttons = filter_buttons(data[i].buttons, now);
-            }
+            if (data[i].connected)
+                handle_input(data[i].buttons);
         }
     }
 
     return ret;
 }
 
-/*
- * Capture the addresses supplied by Fortnite's video-output registration.
- * We then clear the active framebuffer immediately before its flip.
- */
 static int32_t hk_sceVideoOutRegisterBuffers(
     int32_t handle,
     int32_t startIndex,
@@ -400,39 +226,24 @@ static int32_t hk_sceVideoOutRegisterBuffers(
     if (ret >= 0 && addresses && attr &&
         attr->width > 0 && attr->height > 0) {
 
-        /*
-         * The OpenOrbis SDK's OrbisVideoOutBufferAttribute exposes width
-         * and height, but not a pitch member. Keep the calculation tied to
-         * the public structure actually used by this build.
-         *
-         * The framebuffer format used by Fortnite here is 32-bit RGBA/BGRA,
-         * so the linear byte span is width * height * 4.
-         */
         size_t w = (size_t)attr->width;
         size_t h = (size_t)attr->height;
 
-        if (w == 0 || h == 0)
-            return ret;
-
-        /* Clear stale registrations before recording the new buffer set. */
-        memset(g_fbAddr, 0, sizeof(g_fbAddr));
-
         if (h > SIZE_MAX / 4u || w > SIZE_MAX / (h * 4u)) {
             g_fbSize = 0;
+            memset(g_fbAddr, 0, sizeof(g_fbAddr));
             return ret;
         }
 
         g_fbSize = w * h * 4u;
+        memset(g_fbAddr, 0, sizeof(g_fbAddr));
 
         int32_t count = bufferNum;
-        if (count > MAX_FB)
-            count = MAX_FB;
-        if (count < 0)
-            count = 0;
+        if (count < 0) count = 0;
+        if (count > MAX_FB) count = MAX_FB;
 
         for (int32_t i = 0; i < count; ++i) {
             int32_t idx = startIndex + i;
-
             if (idx >= 0 && idx < MAX_FB)
                 g_fbAddr[idx] = addresses[i];
         }
@@ -450,14 +261,9 @@ static int32_t hk_sceVideoOutSubmitFlip(
     if (!orig_sceVideoOutSubmitFlip)
         return -1;
 
-    /*
-     * This is deliberately limited to the local display framebuffer.
-     * No network/authentication/gameplay state is modified.
-     */
     if (g_isFortnite &&
         g_enabled &&
         !g_menu &&
-        !g_capture &&
         bufferIndex >= 0 &&
         bufferIndex < MAX_FB &&
         g_fbAddr[bufferIndex] &&
@@ -526,12 +332,6 @@ static void uninstall_hooks(void) {
     }
 }
 
-/*
- * GoldHEN's plugin loader calls plugin_load/plugin_unload for plugins.
- * Keep module_start/module_stop inert so the loader has one well-defined
- * lifecycle and title detection happens inside the process where the
- * loader actually invoked the plugin.
- */
 attr_public int plugin_load(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -539,16 +339,13 @@ attr_public int plugin_load(int argc, char **argv) {
     g_isFortnite = is_fortnite_process();
     load_armed_state();
     g_menu = false;
-    g_capture = false;
     g_prev = 0;
-    reset_click_timers(sceKernelGetProcessTime());
 
     install_hooks();
 
     notify(g_isFortnite
-        ? (g_enabled ? "FN Menu Hider: ARMED\nL1+Down toggle | L1+R1 menu"
-                     : "FN Menu Hider: DISARMED\nL1+Down toggle | L1+R1 menu")
-        : "FN Menu Hider: standby\nL1+Down arms/disarms");
+        ? "FN Menu Hider: LOADED\nL1+R1 = menu | L1+Down = blackout"
+        : "FN Menu Hider: STANDBY\nL1+Down = arm/disarm");
 
     return 0;
 }
@@ -559,7 +356,7 @@ attr_public int plugin_unload(int argc, char **argv) {
 
     uninstall_hooks();
     g_menu = false;
-    g_capture = false;
+    g_prev = 0;
 
     return 0;
 }
