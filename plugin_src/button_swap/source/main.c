@@ -30,6 +30,7 @@ attr_public uint32_t g_pluginVersion = 0x00000400;
 #define BTN_R1        0x00000800u
 #define BTN_CROSS     0x00004000u
 #define BTN_CIRCLE    0x00002000u
+#define BTN_SQUARE    0x00001000u
 
 #define FN_TITLE_ID "CUSA07669"
 #define ARM_STATE_PATH "/data/GoldHEN/fn_menu_hider_state.bin"
