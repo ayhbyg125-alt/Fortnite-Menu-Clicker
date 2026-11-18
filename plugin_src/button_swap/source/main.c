@@ -49,6 +49,9 @@ static volatile bool g_padHooksInstalled = false;
 static volatile bool g_videoHooksInstalled = false;
 
 static int g_sel = 0;
+/* Runtime rectangle dimensions. Changes are kept in RAM for this plugin load. */
+static uint32_t g_rectWidth = 320u;
+static uint32_t g_rectHeight = 120u;
 static uint32_t g_prev = 0;
 
 static void *g_fbAddr[MAX_FB];
@@ -121,13 +124,18 @@ static void show_menu(void) {
     snprintf(buf, sizeof(buf),
         "== FN MENU HIDER ==\n"
         "%s Rectangle: %s\n"
+        "%s Width: %u\n"
+        "%s Height: %u\n"
         "%s Status: %s\n"
-        "320x120 at top-left\n"
-        "Up/Down select | X toggle | O close\n"
+        "Up/Down select | Left/Right size | X toggle | O close\n"
         "L1+R1 open/close",
         g_sel == 0 ? ">" : " ",
         g_enabled ? "ON" : "OFF",
         g_sel == 1 ? ">" : " ",
+        g_rectWidth,
+        g_sel == 2 ? ">" : " ",
+        g_rectHeight,
+        g_sel == 3 ? ">" : " ",
         g_isFortnite ? "FORTNITE" : "STANDBY");
 
     notify(buf);
