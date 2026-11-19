@@ -54,7 +54,7 @@ static int g_sel = 0;
 static uint32_t g_rectWidth = 320u;
 static uint32_t g_rectHeight = 120u;
 static uint32_t g_prev = 0;
-#define MENU_ITEMS 3
+#define MENU_ITEMS 4
 
 static void *g_fbAddr[MAX_FB];
 static size_t g_fbSize = 0;
@@ -86,7 +86,7 @@ static bool is_fortnite_process(void) {
     if (sys_sdk_proc_info(&procInfo) != 0)
         return false;
 
-    return strncmp(procInfo.titleid, FN_TITLE_ID, sizeof(procInfo.titleid)) == 0;
+    return strncmp(procInfo.titleid, FN_TITLE_ID, sizeof(FN_TITLE_ID) - 1) == 0;
 }
 
 static void notify(const char *msg) {
@@ -249,15 +249,17 @@ static void draw_rectangle(uint8_t *fb) {
 
     size_t x0 = RECT_X;
     size_t y0 = RECT_Y;
-    size_t x1 = x0 + RECT_WIDTH;
-    size_t y1 = y0 + RECT_HEIGHT;
+    size_t rectWidth = (size_t)g_rectWidth;
+    size_t rectHeight = (size_t)g_rectHeight;
+    size_t x1 = x0 + rectWidth;
+    size_t y1 = y0 + rectHeight;
 
     if (x0 >= g_fbWidth || y0 >= g_fbHeight)
         return;
 
-    if (x1 > g_fbWidth)
+    if (x1 < x0 || x1 > g_fbWidth)
         x1 = g_fbWidth;
-    if (y1 > g_fbHeight)
+    if (y1 < y0 || y1 > g_fbHeight)
         y1 = g_fbHeight;
 
     /*
