@@ -48,6 +48,8 @@ static volatile bool g_menu = false;
 static volatile bool g_isFortnite = false;
 static volatile bool g_padHooksInstalled = false;
 static volatile bool g_videoHooksInstalled = false;
+static volatile bool g_padDiagnosticShown = false;
+static volatile bool g_videoDiagnosticShown = false;
 
 static int g_sel = 0;
 /* Runtime rectangle dimensions. Changes are kept in RAM for this plugin load. */
@@ -221,8 +223,13 @@ static int hk_scePadReadState(int32_t handle, OrbisPadData *data) {
 
     int ret = orig_scePadReadState(handle, data);
 
-    if (ret == 0 && data && data->connected)
+    if (ret == 0 && data && data->connected) {
+        if (!g_padDiagnosticShown) {
+            g_padDiagnosticShown = true;
+            notify("FN Menu Hider: PAD HOOK OK");
+        }
         handle_input(data->buttons);
+    }
 
     return ret;
 }
@@ -235,8 +242,13 @@ static int hk_scePadRead(int32_t handle, OrbisPadData *data, int32_t count) {
 
     if (ret > 0 && data) {
         for (int32_t i = 0; i < ret; ++i) {
-            if (data[i].connected)
+            if (data[i].connected) {
+                if (!g_padDiagnosticShown) {
+                    g_padDiagnosticShown = true;
+                    notify("FN Menu Hider: PAD HOOK OK");
+                }
                 handle_input(data[i].buttons);
+            }
         }
     }
 
@@ -312,6 +324,15 @@ static int32_t hk_sceVideoOutRegisterBuffers(
         g_fbWidth = w;
         g_fbHeight = h;
         g_fbSize = w * h * 4u;
+
+        if (!g_videoDiagnosticShown) {
+            char buf[128];
+            g_videoDiagnosticShown = true;
+            snprintf(buf, sizeof(buf),
+                "FN Menu Hider: VIDEO HOOK OK %ux%u (%d buffers)",
+                (unsigned)w, (unsigned)h, (int)bufferNum);
+            notify(buf);
+        }
         memset(g_fbAddr, 0, sizeof(g_fbAddr));
 
         int32_t count = bufferNum;
@@ -415,6 +436,8 @@ attr_public int plugin_load(int argc, char **argv) {
     load_armed_state();
     g_menu = false;
     g_prev = 0;
+    g_padDiagnosticShown = false;
+    g_videoDiagnosticShown = false;
     g_fbSize = 0;
     g_fbWidth = 0;
     g_fbHeight = 0;
@@ -434,6 +457,8 @@ attr_public int plugin_unload(int argc, char **argv) {
     uninstall_hooks();
     g_menu = false;
     g_prev = 0;
+    g_padDiagnosticShown = false;
+    g_videoDiagnosticShown = false;
     g_fbSize = 0;
     g_fbWidth = 0;
     g_fbHeight = 0;
