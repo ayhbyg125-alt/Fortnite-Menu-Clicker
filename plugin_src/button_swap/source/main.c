@@ -18,9 +18,9 @@
 #define attr_public __attribute__((visibility("default")))
 
 attr_public const char *g_pluginName = "button_swap";
-attr_public const char *g_pluginDesc = "Fortnite framebuffer rectangle + diagnostic menu";
+attr_public const char *g_pluginDesc = "Global diagnostic overlay menu + framebuffer rectangle";
 attr_public const char *g_pluginAuth = "Fortnite-Menu-Hider";
-attr_public uint32_t g_pluginVersion = 0x00000400;
+attr_public uint32_t g_pluginVersion = 0x00000500;
 
 #define BTN_UP        0x00000010u
 #define BTN_RIGHT     0x00000020u
@@ -54,6 +54,7 @@ static int g_sel = 0;
 static uint32_t g_rectWidth = 320u;
 static uint32_t g_rectHeight = 120u;
 static uint32_t g_prev = 0;
+#define MENU_ITEMS 3
 
 static void *g_fbAddr[MAX_FB];
 static size_t g_fbSize = 0;
@@ -128,8 +129,8 @@ static void show_menu(void) {
         "%s Width: %u\n"
         "%s Height: %u\n"
         "%s Status: %s\n"
-        "Up/Down select | Left/Right size | X toggle | O close\n"
-        "L1+R1 open/close",
+        "Up/Down select | Left/Right change | Square toggle | Circle close\n"
+        "L1+R1 open/close | X passes through",
         g_sel == 0 ? ">" : " ",
         g_enabled ? "ON" : "OFF",
         g_sel == 1 ? ">" : " ",
@@ -176,12 +177,12 @@ static void handle_input(uint32_t phys) {
     }
 
     if (pressed & BTN_UP) {
-        g_sel = (g_sel + 1) % 2;
+        g_sel = (g_sel + MENU_ITEMS - 1) % MENU_ITEMS;
         show_menu();
     }
 
     if (pressed & BTN_DOWN) {
-        g_sel = (g_sel + 1) % 2;
+        g_sel = (g_sel + 1) % MENU_ITEMS;
         show_menu();
     }
 
@@ -191,12 +192,25 @@ static void handle_input(uint32_t phys) {
         return;
     }
 
-    if (pressed & BTN_CROSS) {
-        if (g_sel == 0) {
-            g_enabled = !g_enabled;
-            save_armed_state();
-        }
+    if (pressed & BTN_SQUARE) {
+        g_enabled = !g_enabled;
+        save_armed_state();
+        show_menu();
+    }
 
+    if (pressed & BTN_LEFT) {
+        if (g_sel == 1 && g_rectWidth > 32u)
+            g_rectWidth -= 16u;
+        else if (g_sel == 2 && g_rectHeight > 16u)
+            g_rectHeight -= 16u;
+        show_menu();
+    }
+
+    if (pressed & BTN_RIGHT) {
+        if (g_sel == 1 && g_rectWidth < 4096u)
+            g_rectWidth += 16u;
+        else if (g_sel == 2 && g_rectHeight < 4096u)
+            g_rectHeight += 16u;
         show_menu();
     }
 }
@@ -321,8 +335,7 @@ static int32_t hk_sceVideoOutSubmitFlip(
     if (!orig_sceVideoOutSubmitFlip)
         return -1;
 
-    if (g_isFortnite &&
-        g_enabled &&
+    if (g_enabled &&
         !g_menu &&
         bufferIndex >= 0 &&
         bufferIndex < MAX_FB &&
@@ -355,7 +368,7 @@ static void install_hooks(void) {
         g_padHooksInstalled = true;
     }
 
-    if (g_isFortnite && !g_videoHooksInstalled) {
+    if (!g_videoHooksInstalled) {
         Detour_Construct(&g_dRegisterBuffers, DetourMode_x64);
         orig_sceVideoOutRegisterBuffers =
             (sceVideoOutRegisterBuffers_t)Detour_DetourFunction(
@@ -407,9 +420,7 @@ attr_public int plugin_load(int argc, char **argv) {
 
     install_hooks();
 
-    notify(g_isFortnite
-        ? "FN Menu Hider: LOADED\nL1+R1 = menu | L1+Down = rectangle"
-        : "FN Menu Hider: STANDBY\nL1+Down = arm/disarm");
+    notify("FN Menu Hider: READY\nL1+R1 = menu | L1+Down = rectangle | Square = toggle");
 
     return 0;
 }
